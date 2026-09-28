@@ -23,3 +23,5 @@ database/
 logs/
 *.db
 *.sqlite
+tessdata/
+*.traineddata
