@@ -1,0 +1,25 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+
+# Logs and stats
+*.log
+.daily_run_stat*
+
+# IDE settings
+.vscode/
+.idea/
+data/
+database/
+logs/
+*.db
+*.sqlite
