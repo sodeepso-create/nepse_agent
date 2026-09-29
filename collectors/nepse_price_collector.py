@@ -49,7 +49,55 @@ def _to_float(val):
 def _to_int(val):
     f = _to_float(val)
     return int(f) if f is not None else None
+def _clamp_outlier_ranges(rows: list) -> list:
+    """Sanitize rows whose high-low range is absurd vs recent history.
 
+    NEPSE API occasionally returns bad highs/lows (intraday spikes,
+    data entry errors). We clamp rather than delete so we keep the
+    trading day, but limit the damage to window-based indicators.
+    """
+    if not rows:
+        return rows
+
+    # Sort by date so rolling context is chronological
+    rows_sorted = sorted(rows, key=lambda r: r.get("date", ""))
+    cleaned = []
+    recent_ranges = []
+
+    for r in rows_sorted:
+        h, l, c = r.get("high"), r.get("low"), r.get("close")
+        if h is None or l is None or c is None or c <= 0:
+            cleaned.append(r)
+            continue
+
+        rng = float(h) - float(l)
+        if rng < 0:
+            # invalid: high < low
+            r["high"] = c
+            r["low"] = c
+            cleaned.append(r)
+            continue
+
+        if len(recent_ranges) >= 10:
+            sorted_recent = sorted(recent_ranges)
+            median = sorted_recent[len(sorted_recent) // 2]
+            # 3x median is the outlier threshold
+            if median > 0 and rng > 3 * median:
+                # Clamp to 1.5x median range, centered on close
+                half = (median * 1.5) / 2
+                r["high"] = round(c + half, 2)
+                r["low"] = round(c - half, 2)
+                logger.warning(
+                    "Clamped outlier range on %s: orig H=%.2f L=%.2f C=%.2f -> H=%.2f L=%.2f",
+                    r["date"], h, l, c, r["high"], r["low"],
+                )
+
+        cleaned.append(r)
+        recent_ranges.append(float(r["high"]) - float(r["low"]))
+        if len(recent_ranges) > 20:
+            recent_ranges.pop(0)
+
+    return cleaned
 
 class NepsePriceCollector(BaseCollector):
     source_name = "nepse_price"
@@ -157,6 +205,7 @@ class NepsePriceCollector(BaseCollector):
                 return []
 
             if rows:
+                rows = _clamp_outlier_ranges(rows)
                 db.upsert_security(symbol)
                 db.insert_ohlc_rows(rows, source="nepseman")
                 logger.info(
@@ -207,6 +256,7 @@ class NepsePriceCollector(BaseCollector):
                 logger.debug("Skip quote %s: %s", q, e)
 
         if rows:
+            rows = _clamp_outlier_ranges(rows)
             db.upsert_security(symbol, company_name=data.get("name"))
             db.insert_ohlc_rows(rows, source="merolagani")
             logger.info("Collected %d history rows for %s from Merolagani", len(rows), symbol)
