@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from analysis import indicators as ind
@@ -63,10 +65,31 @@ def test_atr_and_stochastic_present():
     assert computed["stochastic_k"] is not None
 
 
+def test_rsi_matches_wilder_textbook():
+    """RSI must match Wilder's classic textbook values within tolerance."""
+    closes = [44.34, 44.09, 44.15, 43.61, 44.33, 44.83, 45.10, 45.42,
+              45.84, 46.08, 45.89, 46.03, 45.61, 46.28, 46.28, 46.00,
+              46.03, 46.41, 46.22, 45.64]
+    rows = [
+        {
+            "symbol": "TEST",
+            "date": f"2024-01-{i+1:02d}",
+            "open": c, "high": c + 0.5, "low": c - 0.5,
+            "close": c, "volume": 1000,
+        }
+        for i, c in enumerate(closes)
+    ]
+    df = ind.to_dataframe(rows)
+    rsi_series = ind.rsi(df)
+    val = rsi_series.iloc[14]
+    assert val == pytest.approx(70.53, abs=0.5), f"RSI got {val}, expected ~70.53"
+
+
 if __name__ == "__main__":
     test_uptrend_detected()
     test_downtrend_detected()
     test_insufficient_data_returns_none()
     test_rsi_in_valid_range()
     test_atr_and_stochastic_present()
+    test_rsi_matches_wilder_textbook()
     print("All tests passed.")
