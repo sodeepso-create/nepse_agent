@@ -1,4 +1,4 @@
-"""Fast vectorized walk-forward backtest."""
+"""Fast vectorized walk-forward backtest with realistic costs."""
 from __future__ import annotations
 
 import pandas as pd
@@ -11,6 +11,13 @@ from strategy.rules import STRATEGIES
 logger = get_logger(__name__)
 
 
+# Cost model — NEPSE broker commission + SEBON + DP charges ≈ 0.4% per side.
+# Slippage: for illiquid stocks, real fills differ from close. 0.3% per side
+# is a conservative default.
+DEFAULT_COMMISSION_PCT = 0.4
+DEFAULT_SLIPPAGE_PCT = 0.3
+
+
 def _trend(e20, e50, price):
     if pd.isna(e20) or pd.isna(e50):
         return "sideways"
@@ -21,8 +28,37 @@ def _trend(e20, e50, price):
     return "sideways"
 
 
-def run_backtest(symbol: str, strategy_name: str = "default",
-                 starting_capital: float = 100_000.0, min_bars: int = 40):
+def _buy_and_hold_benchmark(closes, starting_capital: float, per_side_cost: float):
+    """Buy on first bar, hold to last. Applies entry and exit costs."""
+    if len(closes) < 2:
+        return None
+    first = float(closes[0])
+    last = float(closes[-1])
+    effective_buy = first * (1 + per_side_cost)
+    qty = int(starting_capital // effective_buy)
+    if qty <= 0:
+        return None
+    cash_spent = qty * effective_buy
+    leftover = starting_capital - cash_spent
+    effective_sell = last * (1 - per_side_cost)
+    final = leftover + qty * effective_sell
+    ret = (final - starting_capital) / starting_capital * 100
+    return {
+        "buy_price": round(first, 2),
+        "sell_price": round(last, 2),
+        "final_capital": round(final, 2),
+        "total_return_percent": round(ret, 2),
+    }
+
+
+def run_backtest(
+    symbol: str,
+    strategy_name: str = "default",
+    starting_capital: float = 100_000.0,
+    min_bars: int = 40,
+    commission_pct: float = DEFAULT_COMMISSION_PCT,
+    slippage_pct: float = DEFAULT_SLIPPAGE_PCT,
+):
     rows = db.get_ohlc(symbol, limit_days=10000)
     if len(rows) < min_bars + 10:
         return None
@@ -63,9 +99,12 @@ def run_backtest(symbol: str, strategy_name: str = "default",
     resv = res.values
     dates = df["date"].values
 
+    per_side_cost = (commission_pct + slippage_pct) / 100.0
+
     cash = starting_capital
     position = 0
     entry = 0.0
+    total_fees_paid = 0.0
     equity_curve = []
     trades = []
 
@@ -112,16 +151,32 @@ def run_backtest(symbol: str, strategy_name: str = "default",
         rec = result["recommendation"]
 
         if position == 0 and rec == "BUY":
-            qty = int((cash * 0.95) // price)
+            effective_buy_price = price * (1 + per_side_cost)
+            qty = int((cash * 0.95) // effective_buy_price)
             if qty > 0:
-                cash -= qty * price
+                fee_cost = qty * (effective_buy_price - price)
+                cash -= qty * effective_buy_price
+                total_fees_paid += fee_cost
                 position = qty
                 entry = price
-                trades.append({"side": "BUY", "price": price, "date": dates[i]})
+                trades.append({
+                    "side": "BUY",
+                    "price": price,
+                    "date": dates[i],
+                    "qty": qty,
+                    "fee": round(fee_cost, 2),
+                })
         elif position > 0 and rec == "SELL":
-            cash += position * price
+            effective_sell_price = price * (1 - per_side_cost)
+            fee_cost = position * (price - effective_sell_price)
+            cash += position * effective_sell_price
+            total_fees_paid += fee_cost
             trades.append({
-                "side": "SELL", "price": price, "date": dates[i],
+                "side": "SELL",
+                "price": price,
+                "date": dates[i],
+                "qty": position,
+                "fee": round(fee_cost, 2),
                 "pnl_pct": round((price - entry) / entry * 100, 2),
             })
             position = 0
@@ -131,12 +186,20 @@ def run_backtest(symbol: str, strategy_name: str = "default",
 
     if position > 0:
         last = float(closes[-1])
-        cash += position * last
+        effective_sell_price = last * (1 - per_side_cost)
+        fee_cost = position * (last - effective_sell_price)
+        cash += position * effective_sell_price
+        total_fees_paid += fee_cost
         trades.append({
-            "side": "SELL", "price": last, "date": dates[-1],
+            "side": "SELL",
+            "price": last,
+            "date": dates[-1],
+            "qty": position,
+            "fee": round(fee_cost, 2),
             "pnl_pct": round((last - entry) / entry * 100, 2) if entry else 0,
         })
         equity_curve.append(cash)
+        position = 0
 
     closed = [t for t in trades if t["side"] == "SELL" and "pnl_pct" in t]
     wins = [t for t in closed if t["pnl_pct"] > 0]
@@ -150,6 +213,10 @@ def run_backtest(symbol: str, strategy_name: str = "default",
         dd = (peak - eq) / peak * 100 if peak else 0
         max_dd = max(max_dd, dd)
 
+    benchmark = _buy_and_hold_benchmark(
+        closes[min_bars:], starting_capital, per_side_cost
+    )
+
     result = {
         "symbol": symbol.upper(),
         "strategy_version": strategy_name,
@@ -160,6 +227,11 @@ def run_backtest(symbol: str, strategy_name: str = "default",
         "total_return_percent": round(total_return, 2),
         "max_drawdown_percent": round(max_dd, 2),
         "final_capital": round(cash, 2),
+        "total_fees_paid": round(total_fees_paid, 2),
+        "commission_pct": commission_pct,
+        "slippage_pct": slippage_pct,
+        "benchmark_return_percent": benchmark["total_return_percent"] if benchmark else None,
+        "benchmark_final_capital": benchmark["final_capital"] if benchmark else None,
     }
     try:
         db.save_backtest_run(result)

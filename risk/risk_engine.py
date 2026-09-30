@@ -71,7 +71,7 @@ def stop_loss_price(entry: float, atr: float | None, side: str = "BUY") -> float
     return min(raw, round(entry * 1.10, 2))  # no higher than +10%
 
 
-def target_price(entry: float, stop: float, side: str = "BUY", rr: float = 2.0) -> float:
+def target_price(entry: float, stop: float, side: str = "BUY", rr: float = 999.0) -> float:
     """Target from risk-reward ratio. Capped by NEPSE circuit breaker."""
     risk = abs(entry - stop)
     if side == "BUY":

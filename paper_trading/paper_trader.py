@@ -48,7 +48,7 @@ def _mark_open_positions(cash: float) -> tuple[float, list]:
     return equity, open_trades
 
 
-def _maybe_close(trade: dict, price: float, indicators: dict):
+def _maybe_close(trade: dict, close_price: float, hi: float, lo: float, indicators: dict):
     """Returns (closed, reason, net_pnl, sale_proceeds).
     sale_proceeds = cash that will arrive T+2.
     """
@@ -60,25 +60,25 @@ def _maybe_close(trade: dict, price: float, indicators: dict):
 
     should_close = False
     reason = ""
+    exit_price = None
     if action == "BUY":
-        if stop and price <= stop:
-            should_close, reason = True, "stop_loss"
-        elif target and price >= target:
-            should_close, reason = True, "target"
+        if stop and lo <= stop:
+            should_close, reason, exit_price = True, "stop_loss", stop
+        elif target and hi >= target:
+            should_close, reason, exit_price = True, "target", target
         elif (indicators.get("trend") == "bearish"
               and indicators.get("macd_signal") == "bearish_crossover"):
-            should_close, reason = True, "signal_exit"
+            should_close, reason, exit_price = True, "signal_exit", close_price
     else:
-        if stop and price >= stop:
-            should_close, reason = True, "stop_loss"
-        elif target and price <= target:
-            should_close, reason = True, "target"
+        if stop and hi >= stop:
+            should_close, reason, exit_price = True, "stop_loss", stop
+        elif target and lo <= target:
+            should_close, reason, exit_price = True, "target", target
 
     if not should_close:
         return False, "", 0.0, 0.0
 
-    # Sell fill = close with adverse slippage
-    sell_fill = round(price * (1 - SLIPPAGE_PCT), 2)
+    sell_fill = round(exit_price * (1 - SLIPPAGE_PCT), 2)
 
     if action == "BUY":
         gross = sell_fill * qty
@@ -112,7 +112,6 @@ def run_paper_trading_pass(symbols=None):
         return [{"symbol": "*", "recommendation": "SKIP", "composite_score": 0,
                  "error": "No profitable stocks configured"}]
 
-    # 0. First — settle any matured T+2 proceeds from prior sales
     settled = db.settle_matured()
     if settled > 0:
         logger.info("Settled %.2f from matured T+2 proceeds", settled)
@@ -144,8 +143,7 @@ def run_paper_trading_pass(symbols=None):
         computed = ind.compute_all(rows)
         if not computed:
             continue
-        news = db.get_recent_news(symbol, limit=5)
-        result = score(computed, news_items=news)
+        result = score(computed, news_items=None)
         db.save_score(symbol, result["as_of_date"], computed,
                       result["composite_score"], result["recommendation"], result["reasons"])
 
@@ -153,23 +151,26 @@ def run_paper_trading_pass(symbols=None):
         existing = open_by_symbol.get(symbol)
 
         if existing:
-            closed, reason, net_pnl, proceeds = _maybe_close(existing, price, computed)
+            last_row = rows[-1]
+            hi = float(last_row["high"])
+            lo = float(last_row["low"])
+            closed, reason, net_pnl, proceeds = _maybe_close(existing, price, hi, lo, computed)
             if closed:
-                # T+2: proceeds go to settlement queue, not cash
                 db.add_settlement(proceeds, settle_date)
                 logger.info("Proceeds %.2f will settle on %s (T+2)", proceeds, settle_date)
                 equity, open_trades = _mark_open_positions(cash)
                 open_by_symbol = {t["symbol"]: t for t in open_trades}
 
         existing = open_by_symbol.get(symbol)
-        if result["recommendation"] == "BUY" and not existing:
+        if (result["recommendation"] == "BUY"
+                and computed["macd_signal"] == "bullish_crossover"
+                and not existing):
             dd_raw = db.get_setting(f"DD_{symbol}", "")
             try:
                 dd_pct = float(dd_raw) if dd_raw else None
             except ValueError:
                 dd_pct = None
 
-            # Buy fill = close with adverse slippage
             fill = round(price * (1 + SLIPPAGE_PCT), 2)
 
             qty = position_size(fill, cash, dd_pct)

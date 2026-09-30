@@ -25,3 +25,7 @@ logs/
 *.sqlite
 tessdata/
 *.traineddata
+
+# Backups
+backups/
+*.zip

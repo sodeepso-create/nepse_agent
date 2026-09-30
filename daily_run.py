@@ -138,6 +138,11 @@ def main():
     if slot:
         _mark_slot_done(slot)
 
+    try:
+        import backup_db  # noqa: F401
+    except Exception as e:
+        print(f"Backup failed: {e}")
+
     tag = f"{reason} | slot={slot or 'forced'}"
     print(f"\n=== NEPSE run started at {datetime.now().isoformat(timespec='seconds')} ({tag}) ===")
 
