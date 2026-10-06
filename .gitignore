@@ -29,3 +29,4 @@ tessdata/
 # Backups
 backups/
 *.zip
+paper_history.csv
