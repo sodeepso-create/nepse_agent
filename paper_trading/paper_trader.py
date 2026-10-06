@@ -48,10 +48,7 @@ def _mark_open_positions(cash: float) -> tuple[float, list]:
     return equity, open_trades
 
 
-def _maybe_close(trade: dict, close_price: float, hi: float, lo: float, indicators: dict):
-    """Returns (closed, reason, net_pnl, sale_proceeds).
-    sale_proceeds = cash that will arrive T+2.
-    """
+def _maybe_close(trade: dict, price: float, indicators: dict):
     stop = trade.get("stop_loss")
     target = trade.get("target")
     action = trade["action"]
@@ -60,25 +57,24 @@ def _maybe_close(trade: dict, close_price: float, hi: float, lo: float, indicato
 
     should_close = False
     reason = ""
-    exit_price = None
     if action == "BUY":
-        if stop and lo <= stop:
-            should_close, reason, exit_price = True, "stop_loss", stop
-        elif target and hi >= target:
-            should_close, reason, exit_price = True, "target", target
+        if stop and price <= stop:
+            should_close, reason = True, "stop_loss"
+        elif target and price >= target:
+            should_close, reason = True, "target"
         elif (indicators.get("trend") == "bearish"
               and indicators.get("macd_signal") == "bearish_crossover"):
-            should_close, reason, exit_price = True, "signal_exit", close_price
+            should_close, reason = True, "signal_exit"
     else:
-        if stop and hi >= stop:
-            should_close, reason, exit_price = True, "stop_loss", stop
-        elif target and lo <= target:
-            should_close, reason, exit_price = True, "target", target
+        if stop and price >= stop:
+            should_close, reason = True, "stop_loss"
+        elif target and price <= target:
+            should_close, reason = True, "target"
 
     if not should_close:
         return False, "", 0.0, 0.0
 
-    sell_fill = round(exit_price * (1 - SLIPPAGE_PCT), 2)
+    sell_fill = round(price * (1 - SLIPPAGE_PCT), 2)
 
     if action == "BUY":
         gross = sell_fill * qty
@@ -112,6 +108,7 @@ def run_paper_trading_pass(symbols=None):
         return [{"symbol": "*", "recommendation": "SKIP", "composite_score": 0,
                  "error": "No profitable stocks configured"}]
 
+    # Settle any matured T+2 proceeds from prior sales
     settled = db.settle_matured()
     if settled > 0:
         logger.info("Settled %.2f from matured T+2 proceeds", settled)
@@ -143,7 +140,8 @@ def run_paper_trading_pass(symbols=None):
         computed = ind.compute_all(rows)
         if not computed:
             continue
-        result = score(computed, news_items=None)
+        news = db.get_recent_news(symbol, limit=5)
+        result = score(computed, news_items=news)
         db.save_score(symbol, result["as_of_date"], computed,
                       result["composite_score"], result["recommendation"], result["reasons"])
 
@@ -151,10 +149,7 @@ def run_paper_trading_pass(symbols=None):
         existing = open_by_symbol.get(symbol)
 
         if existing:
-            last_row = rows[-1]
-            hi = float(last_row["high"])
-            lo = float(last_row["low"])
-            closed, reason, net_pnl, proceeds = _maybe_close(existing, price, hi, lo, computed)
+            closed, reason, net_pnl, proceeds = _maybe_close(existing, price, computed)
             if closed:
                 db.add_settlement(proceeds, settle_date)
                 logger.info("Proceeds %.2f will settle on %s (T+2)", proceeds, settle_date)
@@ -162,9 +157,7 @@ def run_paper_trading_pass(symbols=None):
                 open_by_symbol = {t["symbol"]: t for t in open_trades}
 
         existing = open_by_symbol.get(symbol)
-        if (result["recommendation"] == "BUY"
-                and computed["macd_signal"] == "bullish_crossover"
-                and not existing):
+        if result["recommendation"] == "BUY" and not existing:
             dd_raw = db.get_setting(f"DD_{symbol}", "")
             try:
                 dd_pct = float(dd_raw) if dd_raw else None
@@ -172,9 +165,17 @@ def run_paper_trading_pass(symbols=None):
                 dd_pct = None
 
             fill = round(price * (1 + SLIPPAGE_PCT), 2)
+            board = _board_lot(symbol)
 
             qty = position_size(fill, cash, dd_pct)
-            qty = (qty // _board_lot(symbol)) * _board_lot(symbol)
+            qty = (qty // board) * board
+
+            # If rounding to 0 but one board lot is affordable within 20% overrun, take it
+            if qty == 0:
+                one_lot_cost = board * fill * (1 + COMMISSION_PCT)
+                max_budget = cash * (settings.MAX_POSITION_SIZE_PERCENT / 100.0) * 1.2
+                if one_lot_cost <= max_budget and one_lot_cost <= cash:
+                    qty = board
 
             if qty > 0:
                 stop = stop_loss_price(fill, computed.get("atr"), "BUY")
@@ -211,4 +212,10 @@ def run_paper_trading_pass(symbols=None):
 
     equity, _ = _mark_open_positions(cash)
     db.record_paper_equity(cash, equity, note="paper_pass")
+
+    buys = sum(1 for r in results if r.get("recommendation") == "BUY")
+    logger.info(
+        "Paper trade pass done: %d stocks checked, %d BUY signals, %d open positions",
+        len(results), buys, len(db.get_open_paper_trades()),
+    )
     return results

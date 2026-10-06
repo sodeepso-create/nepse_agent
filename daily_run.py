@@ -20,12 +20,7 @@ _LOG_DIR = Path(__file__).resolve().parent / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
 _LOG_FILE = _LOG_DIR / "daily_run.log"
 
-# Only redirect when run via pythonw.exe (no console).
-# Manual runs (python daily_run.py) still print to terminal.
-if sys.stdout is None or sys.stderr is None:
-    _LOG_HANDLE = open(_LOG_FILE, "a", encoding="utf-8", buffering=1)
-    sys.stdout = _LOG_HANDLE
-    sys.stderr = _LOG_HANDLE
+
 
 NEPSE_2026_HOLIDAYS = {
     "2026-01-11": "Prithvi Jayanti",
