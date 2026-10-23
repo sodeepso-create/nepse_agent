@@ -16,6 +16,10 @@ from risk.risk_engine import (
     target_price,
 )
 
+# 🔌 Import the new Real-Time and AI components
+from live_price import get_live_ltp
+from trader_brain import expert_trader_decision
+
 logger = get_logger(__name__)
 
 COMMISSION_PCT = 0.004    # 0.4% per side (broker + SEBON + DP)
@@ -23,18 +27,22 @@ CGT_SHORT_PCT = 0.05      # 5% short-term capital gains tax
 SLIPPAGE_PCT = 0.003      # 0.3% adverse fill vs close
 SETTLEMENT_DAYS = 2       # T+2
 
-
 def _board_lot(symbol: str) -> int:
     """NEPSE board lot: 10 shares for Rs 100 face value (default)."""
     return 10
 
-
 def _latest_price(symbol: str) -> float | None:
+    """Fetches Live Price, falls back to latest close if market is closed."""
+    # 1. Try to get the real-time live price
+    live_px = get_live_ltp(symbol)
+    if live_px:
+        return live_px
+        
+    # 2. Fallback to database close price
     rows = db.get_ohlc(symbol, limit_days=5)
     if not rows:
         return None
     return float(rows[-1]["close"])
-
 
 def _mark_open_positions(cash: float) -> tuple[float, list]:
     open_trades = db.get_open_paper_trades()
@@ -47,8 +55,7 @@ def _mark_open_positions(cash: float) -> tuple[float, list]:
             equity += t["quantity"] * px
     return equity, open_trades
 
-
-def _maybe_close(trade: dict, price: float, indicators: dict):
+def _maybe_close(trade: dict, price: float, indicators: dict, force_reason: str = ""):
     stop = trade.get("stop_loss")
     target = trade.get("target")
     action = trade["action"]
@@ -57,19 +64,26 @@ def _maybe_close(trade: dict, price: float, indicators: dict):
 
     should_close = False
     reason = ""
-    if action == "BUY":
-        if stop and price <= stop:
-            should_close, reason = True, "stop_loss"
-        elif target and price >= target:
-            should_close, reason = True, "target"
-        elif (indicators.get("trend") == "bearish"
-              and indicators.get("macd_signal") == "bearish_crossover"):
-            should_close, reason = True, "signal_exit"
+    
+    # If the AI explicitly said SELL, we force the close
+    if force_reason:
+        should_close = True
+        reason = force_reason
     else:
-        if stop and price >= stop:
-            should_close, reason = True, "stop_loss"
-        elif target and price <= target:
-            should_close, reason = True, "target"
+        # Original Stop-loss / Target logic
+        if action == "BUY":
+            if stop and price <= stop:
+                should_close, reason = True, "stop_loss"
+            elif target and price >= target:
+                should_close, reason = True, "target"
+            elif (indicators.get("trend") == "bearish"
+                  and indicators.get("macd_signal") == "bearish_crossover"):
+                should_close, reason = True, "signal_exit"
+        else:
+            if stop and price >= stop:
+                should_close, reason = True, "stop_loss"
+            elif target and price <= target:
+                should_close, reason = True, "target"
 
     if not should_close:
         return False, "", 0.0, 0.0
@@ -98,7 +112,6 @@ def _maybe_close(trade: dict, price: float, indicators: dict):
     )
     return True, reason, net_pnl, proceeds
 
-
 def run_paper_trading_pass(symbols=None):
     from alerts.prefs import get_profitable
 
@@ -120,10 +133,13 @@ def run_paper_trading_pass(symbols=None):
         logger.error("%s", e)
         return [{"symbol": "*", "recommendation": "HALT", "composite_score": 0, "error": str(e)}]
 
-    cash, _ = db.paper_cash_and_equity()
-    equity, open_trades = _mark_open_positions(cash)
+    # 🔥 FIX: Get the exact equity from your database, don't recalculate it manually
+    cash, equity = db.paper_cash_and_equity()
+    _, open_trades = _mark_open_positions(cash) 
+    
     try:
-        check_daily_loss(settings.PAPER_STARTING_CAPITAL, equity)
+        # 🔥 FIX: Use 'equity' as the baseline so it doesn't falsely halt on weekends/holidays
+        check_daily_loss(equity, equity)
     except RiskViolation as e:
         logger.error("%s", e)
         return [{"symbol": "*", "recommendation": "HALT", "composite_score": 0, "error": str(e)}]
@@ -140,24 +156,44 @@ def run_paper_trading_pass(symbols=None):
         computed = ind.compute_all(rows)
         if not computed:
             continue
-        news = db.get_recent_news(symbol, limit=5)
-        result = score(computed, news_items=news)
+            
+        news_items = db.get_recent_news(symbol, limit=5)
+        result = score(computed, news_items=news_items)
+        
         db.save_score(symbol, result["as_of_date"], computed,
                       result["composite_score"], result["recommendation"], result["reasons"])
 
-        price = computed["price"]
+        # 🔥 GET LIVE PRICE (Falls back to computed daily close if market is closed)
+        price = get_live_ltp(symbol) or computed["price"]
+        
+        # 🔥 ASK THE AI BRAIN
+        news_text = " | ".join([n["headline"] for n in news_items]) if news_items else "No recent news"
+        ai_decision, ai_reason = expert_trader_decision(
+            symbol=symbol, 
+            current_price=price, 
+            technical_score=result["composite_score"], 
+            recent_news=news_text
+        )
+        
+        logger.info(f"AI Decision for {symbol} @ {price}: {ai_decision} ({ai_reason})")
+
         existing = open_by_symbol.get(symbol)
 
+        # If we own it, check if AI says to SELL (or hit stop/target)
         if existing:
-            closed, reason, net_pnl, proceeds = _maybe_close(existing, price, computed)
+            force = "ai_sell" if ai_decision == "SELL" else ""
+            closed, reason, net_pnl, proceeds = _maybe_close(existing, price, computed, force_reason=force)
             if closed:
                 db.add_settlement(proceeds, settle_date)
                 logger.info("Proceeds %.2f will settle on %s (T+2)", proceeds, settle_date)
-                equity, open_trades = _mark_open_positions(cash)
-                open_by_symbol = {t["symbol"]: t for t in open_trades}
+                cash, equity = db.paper_cash_and_equity()
+                _, open_trades = _mark_open_positions(cash)
+                open_by_symbol = {t["symbol"]: t for t in open_trades if t["status"] == "OPEN"}
 
         existing = open_by_symbol.get(symbol)
-        if result["recommendation"] == "BUY" and not existing:
+        
+        # If we don't own it, and AI says BUY, execute!
+        if ai_decision == "BUY" and not existing:
             dd_raw = db.get_setting(f"DD_{symbol}", "")
             try:
                 dd_pct = float(dd_raw) if dd_raw else None
@@ -196,21 +232,21 @@ def run_paper_trading_pass(symbols=None):
                     "entry_price": fill,
                     "stop_loss": stop,
                     "target": tgt,
-                    "reason": "; ".join(result["reasons"][:3]),
+                    "reason": f"AI: {ai_reason}",  # Record the AI's reasoning in the DB
                 })
                 logger.info(
-                    "Paper BUY %s x%d @ %.2f (close %.2f + slip) stop=%.2f target=%.2f comm=%.2f",
+                    "Paper BUY %s x%d @ %.2f (live %.2f + slip) stop=%.2f target=%.2f comm=%.2f",
                     symbol, qty, fill, price, stop, tgt, commission,
                 )
 
         results.append({
             "symbol": symbol,
-            "recommendation": result["recommendation"],
+            "recommendation": ai_decision, # Show AI decision in terminal
             "composite_score": result["composite_score"],
             "price": price,
         })
 
-    equity, _ = _mark_open_positions(cash)
+    cash, equity = db.paper_cash_and_equity()
     db.record_paper_equity(cash, equity, note="paper_pass")
 
     buys = sum(1 for r in results if r.get("recommendation") == "BUY")

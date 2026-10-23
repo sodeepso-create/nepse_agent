@@ -1,10 +1,9 @@
 """Daily pipeline: collect → research → paper-trade → alerts.
 
-Runs twice on trading days:
-  - Morning window: 11:00-11:45 AM (news + research only, no trades)
-  - Afternoon window: 3:30-3:59 PM (post-close, full pipeline with trades)
-
-Trades use today's official close, not stale data.
+Runs 3 times on trading days to act like an expert passive trader:
+  - Morning window: 11:30 AM - 11:45 AM (news + trades)
+  - Afternoon window: 1:30 PM - 1:45 PM (news + trades)
+  - Pre-close window: 2:45 PM - 2:55 PM (last chance trades)
 """
 from __future__ import annotations
 
@@ -20,8 +19,7 @@ _LOG_DIR = Path(__file__).resolve().parent / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
 _LOG_FILE = _LOG_DIR / "daily_run.log"
 
-
-
+# FALLBACK: Used if the live NEPSE API fails to respond
 NEPSE_2026_HOLIDAYS = {
     "2026-01-11": "Prithvi Jayanti",
     "2026-01-15": "Maghe Sankranti",
@@ -47,9 +45,13 @@ NEPSE_2026_HOLIDAYS = {
     "2026-10-18": "Maha Ashtami",
     "2026-10-19": "Maha Navami",
     "2026-10-20": "Vijaya Dashami",
+    "2026-10-21": "Ekadashi (Dashain)",
+    "2026-10-22": "Dwadashi (Dashain)",
+    "2026-10-23": "Trayodashi (Dashain)",
     "2026-11-08": "Laxmi Puja",
     "2026-11-09": "Gobhardan Pujan",
     "2026-11-10": "Bhai Tika",
+    "2026-11-11": "Gathemangal",
     "2026-11-15": "Chhath Parwa",
     "2026-12-25": "Christmas Day",
 }
@@ -58,19 +60,40 @@ STATE_FILE = Path(__file__).resolve().parent / ".daily_run_state.json"
 
 # (hour, minute_start, minute_end) — local NPT
 SLOTS = {
-    "morning": (11, 0, 45),      # 11:00 - 11:45 AM (news only)
-    "afternoon": (15, 30, 59),   # 3:30 - 3:59 PM (post-close, with trades)
+    "morning": (11, 30, 45),      # 11:30 AM - 11:45 AM
+    "afternoon": (13, 30, 45),    # 1:30 PM - 1:45 PM
+    "pre_close": (14, 45, 55),    # 2:45 PM - 2:55 PM
 }
 
 
 def _is_trading_day() -> tuple[bool, str]:
     today = date.today()
     today_iso = today.isoformat()
-    if today.weekday() in (5, 6):
+
+    # 1. Quick weekend check (NEPSE is closed Friday=4 and Saturday=5)
+    if today.weekday() in (4, 5):
         return False, f"Weekend ({today.strftime('%A')})"
+
+    # 2. Live API Check
+    try:
+        from nepsepy import NepseClient
+        with NepseClient() as client:
+            status = client.market_status()
+        
+        is_open = str(status.get('isOpen', '')).upper()
+        if is_open == 'OPEN':
+            return True, "Trading day (NEPSE API: OPEN)"
+        elif is_open == 'CLOSE':
+            return False, "Market is CLOSED (NEPSE API)"
+            
+    except Exception as e:
+        print(f"⚠️ Note: NEPSE API check failed ({e}). Using fallback holiday list.")
+
+    # 3. Fallback
     if today_iso in NEPSE_2026_HOLIDAYS:
         return False, f"Holiday: {NEPSE_2026_HOLIDAYS[today_iso]}"
-    return True, "Trading day"
+        
+    return True, "Trading day (Fallback check)"
 
 
 def _load_state() -> dict:
@@ -155,15 +178,12 @@ def main():
     except Exception as e:
         print(f"  Research failed: {e}")
 
-    if slot == "morning":
-        print("\n[3/4] Skipping paper trading (morning slot — news only)")
-    else:
-        print("\n[3/4] Running paper trading...")
-        try:
-            from main import cmd_paper_trade
-            cmd_paper_trade(argparse.Namespace())
-        except Exception as e:
-            print(f"  Paper trade failed: {e}")
+    print("\n[3/4] Running paper trading...")
+    try:
+        from main import cmd_paper_trade
+        cmd_paper_trade(argparse.Namespace())
+    except Exception as e:
+        print(f"  Paper trade failed: {e}")
 
     print("\n[4/4] Sending alerts...")
     try:

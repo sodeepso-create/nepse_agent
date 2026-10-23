@@ -193,7 +193,7 @@ def cmd_paper_trade(_args):
     for r in results:
         extra = f" @ {r['price']}" if r.get("price") else ""
         err = f" ({r['error']})" if r.get("error") else ""
-        print(f"{r['symbol']}: {r['recommendation']} (score {r['composite_score']}){extra}{err}")
+        print(f"{r['symbol']}: {r['recommendation']} (score {r.get('composite_score', 0)}){extra}{err}")
     cash, equity = db.paper_cash_and_equity()
     print(f"\nPaper cash: {cash:,.2f}  |  Equity: {equity:,.2f}")
     open_trades = db.get_open_paper_trades()
