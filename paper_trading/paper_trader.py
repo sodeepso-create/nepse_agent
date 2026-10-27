@@ -209,6 +209,7 @@ def run_paper_trading_pass(symbols=None):
 
         results.append({"symbol": symbol, "recommendation": ai_decision, "composite_score": result["composite_score"], "price": price})
 
-    cash, equity = db.paper_cash_and_equity()
-    db.record_paper_equity(cash, equity, note="paper_pass")
+    # Recalculate equity using the UPDATED cash variable
+    current_equity, _ = _mark_open_positions(cash)
+    db.record_paper_equity(cash, current_equity, note="paper_pass")
     return results
