@@ -16,8 +16,8 @@ from risk.risk_engine import (
     target_price,
 )
 
-# 🔌 Import the new Real-Time and AI components
-from live_price import get_live_ltp
+# 🔌 Import the new Real-Time, AI, and Data Gate components
+from live_price import get_live_quote, get_live_ltp
 from trader_brain import expert_trader_decision
 
 logger = get_logger(__name__)
@@ -32,13 +32,15 @@ def _board_lot(symbol: str) -> int:
     return 10
 
 def _latest_price(symbol: str) -> float | None:
-    """Fetches Live Price, falls back to latest close if market is closed."""
-    # 1. Try to get the real-time live price
+    """
+    Used ONLY for calculating Portfolio Equity (reporting).
+    Falls back to EOD close if market is closed.
+    (This does NOT bypass the trade execution Hard Gate).
+    """
     live_px = get_live_ltp(symbol)
     if live_px:
         return live_px
         
-    # 2. Fallback to database close price
     rows = db.get_ohlc(symbol, limit_days=5)
     if not rows:
         return None
@@ -133,12 +135,11 @@ def run_paper_trading_pass(symbols=None):
         logger.error("%s", e)
         return [{"symbol": "*", "recommendation": "HALT", "composite_score": 0, "error": str(e)}]
 
-    # 🔥 FIX: Get the exact equity from your database, don't recalculate it manually
+    # Get exact equity from DB to prevent false halts on weekends/holidays
     cash, equity = db.paper_cash_and_equity()
     _, open_trades = _mark_open_positions(cash) 
     
     try:
-        # 🔥 FIX: Use 'equity' as the baseline so it doesn't falsely halt on weekends/holidays
         check_daily_loss(equity, equity)
     except RiskViolation as e:
         logger.error("%s", e)
@@ -163,8 +164,23 @@ def run_paper_trading_pass(symbols=None):
         db.save_score(symbol, result["as_of_date"], computed,
                       result["composite_score"], result["recommendation"], result["reasons"])
 
-        # 🔥 GET LIVE PRICE (Falls back to computed daily close if market is closed)
-        price = get_live_ltp(symbol) or computed["price"]
+        # 🚧 HARD GATE: DATA FRESHNESS CHECK 🚧
+        # We strictly require a FRESH quote to execute trades. No fallbacks allowed.
+        quote = get_live_quote(symbol)
+        
+        if quote.status != "FRESH":
+            logger.warning(f"SKIPPED_STALE_PRICE: {symbol} - {quote.status} (Source: {quote.source})")
+            results.append({
+                "symbol": symbol,
+                "recommendation": "SKIPPED_STALE_PRICE",
+                "composite_score": result["composite_score"],
+                "price": 0.0,
+                "error": f"Data {quote.status}"
+            })
+            continue  # ⛔ ABORT THIS SYMBOL, DO NOT TRADE
+            
+        # Safe to use the live price!
+        price = quote.price
         
         # 🔥 ASK THE AI BRAIN
         news_text = " | ".join([n["headline"] for n in news_items]) if news_items else "No recent news"
@@ -175,7 +191,7 @@ def run_paper_trading_pass(symbols=None):
             recent_news=news_text
         )
         
-        logger.info(f"AI Decision for {symbol} @ {price}: {ai_decision} ({ai_reason})")
+        logger.info(f"AI Decision for {symbol} @ {price} (Fetched at {quote.fetch_time.strftime('%H:%M:%S')}): {ai_decision} ({ai_reason})")
 
         existing = open_by_symbol.get(symbol)
 

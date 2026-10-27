@@ -1,6 +1,6 @@
 ```
 ==============================================================
- NEPSE PAPER PORTFOLIO REPORT — 2026-10-21T16:16:26
+ NEPSE PAPER PORTFOLIO REPORT — 2026-10-27T10:40:00
 ==============================================================
 
 [ BOUGHT since last report ]
@@ -21,11 +21,11 @@
   SHPC          30     526.57     535.00    16,050.00        252.90    1.60%
 
 [ PORTFOLIO ]
-  Cash              :      21,759.38
+  Cash              :      32,066.79
   Open market value :      71,918.00
-  Equity            :      93,677.38
+  Equity            :     103,984.79
   Starting capital  :     100,000.00
-  Total return      :         -6.32%   (-6,322.62)
+  Total return      :         +3.98%   (3,984.79)
 
 [ P/L BREAKDOWN ]
   Realized (all-time) :        -356.88
