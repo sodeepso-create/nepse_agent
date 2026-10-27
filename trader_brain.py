@@ -3,7 +3,6 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
-
 def expert_trader_decision(symbol, current_price, technical_score, recent_news):
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key: 

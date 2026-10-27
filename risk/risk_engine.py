@@ -35,7 +35,7 @@ def check_daily_loss(starting_equity: float, current_equity: float) -> float:
 
 
 def check_source_health_before_trading(sources):
-    with db.get_conn() as conn:
+    with db.get_connection() as conn:
         for source in sources:
             row = conn.execute(
                 "SELECT consecutive_failures FROM source_health WHERE source = ?",
